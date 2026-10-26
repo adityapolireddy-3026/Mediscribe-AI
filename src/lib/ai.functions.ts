@@ -5,6 +5,7 @@ import {
   generateSoap,
   detectAndTranslate,
   transcribeAndTranslateSegment,
+  geminiTranscribeAndTranslate,
 } from "@/lib/ai.server";
 
 export const transcribeAudio = createServerFn({ method: "POST" })
@@ -39,4 +40,19 @@ export const transcribeLiveSegment = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }) =>
     transcribeAndTranslateSegment(data.audioBase64, data.mimeType, data.languageHint),
+  );
+
+/**
+ * Single-call transcription + translation + language detection.
+ * Replaces the old pattern of calling transcribeAudio then translateTranscript separately.
+ * Cuts API calls from 2 → 1, halving rate-limit risk and latency.
+ */
+export const transcribeAndTranslateAudio = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { audioBase64: string; mimeType: string }) => {
+    if (!input?.audioBase64) throw new Error("No audio provided.");
+    return input;
+  })
+  .handler(async ({ data }) =>
+    geminiTranscribeAndTranslate(data.audioBase64, data.mimeType),
   );

@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -214,20 +215,25 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   ))}
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      onClick={signOut}
-                      className={menuButtonClass}
-                      tooltip="Logout"
-                    >
-                      <LogOut className="size-4 shrink-0" />
-                      <span className="truncate">Logout</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
+
+          <SidebarFooter className="border-t border-sidebar-border pt-2">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  onClick={signOut}
+                  className={`${menuButtonClass} group hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400`}
+                  tooltip="Logout"
+                >
+                  <LogOut className="size-4 shrink-0 group-hover:text-red-600 dark:group-hover:text-red-400" />
+                  <span className="truncate">Logout</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
         </Sidebar>
 
         <div className="flex min-w-0 flex-1 flex-col">

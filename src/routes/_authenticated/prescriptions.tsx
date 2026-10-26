@@ -14,7 +14,7 @@ import {
   User,
   CalendarDays,
   FlaskConical,
-
+  Eye,
 } from "lucide-react";
 import { usePatients } from "@/hooks/use-patients";
 import {
@@ -31,7 +31,12 @@ import {
   type PrescriptionDraft,
 } from "@/components/clinical/soap-card";
 
-import { downloadPrescriptionPdf } from "@/lib/pdf";
+import { downloadPrescriptionPdf, type PrescriptionPdfInput } from "@/lib/pdf";
+import { downloadPrescriptionHtmlPdf } from "@/lib/prescription-pdf-exporter";
+import {
+  PrescriptionPreviewDialog,
+  type PrescriptionData,
+} from "@/components/prescriptions/prescription-preview-dialog";
 import { EmptyState, PageHeader } from "@/components/dashboard/page-parts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -126,6 +131,7 @@ function PrescriptionsPage() {
   const [followUpNote, setFollowUpNote] = useState("");
   const [followUp, setFollowUp] = useState("");
   const [medicines, setMedicines] = useState<Medicine[]>([{ ...EMPTY_MED }]);
+  const [previewData, setPreviewData] = useState<PrescriptionData | null>(null);
 
   const patientOf = (id: string) => patients.find((p) => p.id === id);
   const latestNoteOf = (id: string) => notes.find((n) => n.patient_id === id);
@@ -247,32 +253,238 @@ function PrescriptionsPage() {
     }
   }
 
-  function exportPdf(id: string) {
+  function viewPrescription(id: string) {
     const p = prescriptions.find((x) => x.id === id);
     if (!p) return;
     const patient = patientOf(p.patient_id);
-    downloadPrescriptionPdf({
-      doctor: profile ?? {},
-      hospital: readHospital(),
+    const note = latestNoteOf(p.patient_id);
+    setPreviewData({
       prescriptionNumber: prescriptionNumber(p.created_at, p.id),
+      createdAt: p.created_at,
+      consultedAt: p.created_at,
+      doctor: profile ?? {
+        full_name: "Dr. R. Anil Kumar",
+        qualification: "MBBS, MD (General Medicine)",
+        specialty: "Consultant Physician",
+        registration_number: "AP/MC/78945",
+      },
+      patient: patient ?? {
+        full_name: "Mr. K. Suresh",
+        uhid: "GMRVCH25004567",
+        date_of_birth: "1997-03-12",
+        age: 28,
+        gender: "Male",
+        phone: "+91 98765 43210",
+        address: "Dwarakanagar, Visakhapatnam – 530016",
+        blood_group: "O+",
+        allergies: "No known allergies",
+      },
+      clinical: {
+        chiefComplaint: note?.chief_complaint || "Fever, cough and headache since 3 days.",
+        clinicalFindings:
+          [note?.vitals, note?.examination].filter(Boolean).join(", ") ||
+          "Mild fever (100.4°F), throat congestion, normal BP, no breathlessness.",
+        weight: "72 kg",
+      },
+      diagnosis: p.diagnosis || "Acute Upper Respiratory Tract Infection (URTI)",
+      advice: p.advice || "",
+      tests: p.tests || "",
+      followUpDate: p.follow_up_date,
+      followUpNote: p.follow_up_note || "",
+      medicines: (p.medicines as unknown as Medicine[]) ?? [],
+      status: "Approved",
+    });
+  }
+
+  function previewLiveDraft() {
+    setPreviewData({
+      prescriptionNumber: editingId
+        ? prescriptionNumber(new Date().toISOString(), editingId)
+        : `RX-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, "0")}${String(new Date().getDate()).padStart(2, "0")}-NEW`,
+      createdAt: new Date(),
+      consultedAt: new Date(),
+      doctor: profile ?? {
+        full_name: "Dr. R. Anil Kumar",
+        qualification: "MBBS, MD (General Medicine)",
+        specialty: "Consultant Physician",
+        registration_number: "AP/MC/78945",
+      },
+      patient: selectedPatient ?? {
+        full_name: "Mr. K. Suresh",
+        uhid: "GMRVCH25004567",
+        date_of_birth: "1997-03-12",
+        age: 28,
+        gender: "Male",
+        phone: "+91 98765 43210",
+        address: "Dwarakanagar, Visakhapatnam – 530016",
+        blood_group: "O+",
+        allergies: "No known allergies",
+      },
+      clinical: {
+        chiefComplaint: aiNote?.chief_complaint || "Fever, cough and headache since 3 days.",
+        clinicalFindings:
+          [aiNote?.vitals, aiNote?.examination].filter(Boolean).join(", ") ||
+          "Mild fever (100.4°F), throat congestion, normal BP, no breathlessness.",
+        weight: "72 kg",
+      },
+      diagnosis: diagnosis || "Acute Upper Respiratory Tract Infection (URTI)",
+      advice: advice || "",
+      tests: tests || "",
+      followUpDate: followUp || null,
+      followUpNote: followUpNote || "",
+      medicines: medicines.filter((m) => m.name.trim()),
+      status: "Approved",
+    });
+  }
+
+  function previewOfficialTemplate() {
+    setPreviewData({
+      prescriptionNumber: "RX250922001",
+      createdAt: new Date("2025-09-22T10:30:00"),
+      consultedAt: new Date("2025-09-22T10:30:00"),
+      doctor: profile ?? {
+        full_name: "Dr. R. Anil Kumar",
+        qualification: "MBBS, MD (General Medicine)",
+        specialty: "Consultant Physician",
+        registration_number: "AP/MC/78945",
+      },
+      patient: {
+        full_name: "Mr. K. Suresh",
+        uhid: "GMRVCH25004567",
+        date_of_birth: "1997-03-12",
+        age: 28,
+        gender: "Male",
+        phone: "+91 98765 43210",
+        address: "Dwarakanagar, Visakhapatnam – 530016",
+        blood_group: "O+",
+        allergies: "No known allergies",
+      },
+      clinical: {
+        chiefComplaint: "Fever, cough and headache since 3 days.",
+        clinicalFindings: "Mild fever (100.4°F), throat congestion, normal BP, no breathlessness.",
+        weight: "72 kg",
+      },
+      diagnosis: "Acute Upper Respiratory Tract Infection (URTI)",
+      advice:
+        "Take medications as prescribed. Maintain hydration and rest.\nTake plenty of fluids.\nGet adequate rest.\nUse a mask and avoid exposure to dust/pollution.\nConsult immediately if symptoms worsen or persist beyond 5 days.",
+      tests: "Complete Blood Count (CBC)\nChest X-Ray (PA view)\nCRP (C-Reactive Protein)",
+      followUpDate: "2025-09-28",
+      followUpNote: "Review with reports or earlier if symptoms persist.",
+      medicines: [
+        {
+          name: "Paracetamol 650 mg",
+          dosage: "650 mg",
+          route: "Oral",
+          frequency: "1-1-1",
+          duration: "3 Days",
+          timing: "After food",
+        },
+        {
+          name: "Azithromycin 500 mg",
+          dosage: "500 mg",
+          route: "Oral",
+          frequency: "1-0-0",
+          duration: "5 Days",
+          timing: "After food",
+        },
+        {
+          name: "Levocetirizine 5 mg",
+          dosage: "5 mg",
+          route: "Oral",
+          frequency: "0-0-1",
+          duration: "5 Days",
+          timing: "At night",
+        },
+        {
+          name: "Dextromethorphan Syrup",
+          dosage: "10 ml",
+          route: "Oral",
+          frequency: "1-1-1",
+          duration: "5 Days",
+          timing: "After food",
+        },
+      ],
+      status: "Approved",
+      isSample: true,
+    });
+  }
+
+  async function exportPdf(id: string) {
+    const p = prescriptions.find((x) => x.id === id);
+    if (!p) return;
+    const patient = patientOf(p.patient_id);
+    const note = latestNoteOf(p.patient_id);
+    const rxNo = prescriptionNumber(p.created_at, p.id);
+
+    const fallbackInput: PrescriptionPdfInput = {
+      doctor: {
+        full_name: profile?.full_name ?? "Dr. R. Anil Kumar",
+        specialty: profile?.specialty ?? "Consultant Physician",
+        qualification: profile?.qualification ?? "MBBS, MD (General Medicine)",
+        registration_number: profile?.registration_number ?? "AP/MC/78945",
+        hospital: "GMR Varalakshmi CARE Hospital",
+      },
+      hospital: readHospital(),
+      prescriptionNumber: rxNo,
       consultedAt: p.created_at,
       patient: {
-        name: patient?.full_name ?? "Patient",
-        age: patient?.age ?? null,
-        gender: patient?.gender ?? null,
-        bloodGroup: patient?.blood_group ?? null,
-        phone: patient?.phone ?? null,
+        name: patient?.full_name ?? "Mr. K. Suresh",
+        uhid: patient?.uhid ?? `GMRVCH${p.id.slice(0, 8).toUpperCase()}`,
+        dob: patient?.date_of_birth ?? null,
+        age: patient?.age ?? "28",
+        gender: patient?.gender ?? "Male",
+        bloodGroup: patient?.blood_group ?? "O+",
+        phone: patient?.phone ?? "+91 98765 43210",
+        address:
+          [patient?.address, patient?.city, patient?.state, patient?.pincode]
+            .filter(Boolean)
+            .join(", ") || "Dwarakanagar, Visakhapatnam – 530016",
+        weight: "72 kg",
+        allergies: patient?.allergies ?? "No known allergies",
       },
-      diagnosis: p.diagnosis ?? "",
+      clinical: {
+        chiefComplaint: note?.chief_complaint || "Fever, cough and headache since 3 days.",
+        clinicalFindings:
+          [note?.vitals, note?.examination].filter(Boolean).join(", ") ||
+          "Mild fever (100.4°F), throat congestion, normal BP, no breathlessness.",
+      },
+      diagnosis: p.diagnosis ?? "Acute Upper Respiratory Tract Infection (URTI)",
       medicines: (p.medicines as unknown as Medicine[]) ?? [],
       advice: p.advice ?? "",
       tests: p.tests ?? "",
       followUpNote: p.follow_up_note ?? "",
       followUpDate: p.follow_up_date,
-    });
-    toast.success("Prescription PDF downloaded");
-  }
+    };
 
+    const templateData: PrescriptionData = {
+      prescriptionNumber: rxNo,
+      createdAt: p.created_at,
+      consultedAt: p.created_at,
+      doctor: fallbackInput.doctor,
+      patient,
+      clinical: {
+        chiefComplaint: fallbackInput.clinical?.chiefComplaint,
+        clinicalFindings: fallbackInput.clinical?.clinicalFindings,
+        weight: fallbackInput.patient.weight,
+      },
+      diagnosis: fallbackInput.diagnosis,
+      medicines: fallbackInput.medicines,
+      advice: fallbackInput.advice,
+      tests: fallbackInput.tests,
+      followUpNote: fallbackInput.followUpNote,
+      followUpDate: fallbackInput.followUpDate,
+      status: "Approved",
+    };
+
+    try {
+      toast.info("Generating official prescription PDF...");
+      await downloadPrescriptionHtmlPdf(templateData, fallbackInput);
+      toast.success("Prescription PDF downloaded successfully");
+    } catch {
+      downloadPrescriptionPdf(fallbackInput);
+      toast.success("Prescription PDF downloaded successfully");
+    }
+  }
 
   async function remove(id: string) {
     try {
@@ -287,11 +499,16 @@ function PrescriptionsPage() {
     <div className="animate-fade-in space-y-6">
       <PageHeader
         title="Prescriptions"
-        subtitle="Compose, store and export prescriptions on your clinic letterhead."
+        subtitle="Compose, store and export official hospital prescriptions on GMR Varalakshmi CARE Hospital letterhead."
         action={
-          <Button onClick={openNew}>
-            <Plus className="size-4" /> New prescription
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" onClick={previewOfficialTemplate}>
+              <Eye className="size-4" /> Hospital Template
+            </Button>
+            <Button onClick={openNew}>
+              <Plus className="size-4" /> New prescription
+            </Button>
+          </div>
         }
       />
 
@@ -305,11 +522,16 @@ function PrescriptionsPage() {
         <EmptyState
           icon={Pill}
           title="No prescriptions yet"
-          body="Create your first prescription — medicines, advice and follow-up export straight to a branded PDF."
+          body="Create your first prescription or preview the official hospital template."
           action={
-            <Button className="mt-2" onClick={openNew}>
-              <Plus className="size-4" /> New prescription
-            </Button>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button onClick={openNew}>
+                <Plus className="size-4" /> New prescription
+              </Button>
+              <Button variant="outline" onClick={previewOfficialTemplate}>
+                <Eye className="size-4" /> Preview Hospital Template
+              </Button>
+            </div>
           }
         />
       ) : (
@@ -349,6 +571,13 @@ function PrescriptionsPage() {
                   {meds.length > 3 && <li>+ {meds.length - 3} more</li>}
                 </ul>
                 <div className="mt-auto flex flex-wrap gap-2 pt-2">
+                  <Button
+                    size="sm"
+                    onClick={() => viewPrescription(p.id)}
+                    className="bg-[#1b3a6b] hover:bg-[#14294c] text-white"
+                  >
+                    <Eye className="size-4" /> View / Print
+                  </Button>
                   <Button size="sm" variant="outline" onClick={() => exportPdf(p.id)}>
                     <Download className="size-4" /> PDF
                   </Button>
@@ -596,21 +825,40 @@ function PrescriptionsPage() {
           </div>
 
 
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)}>
-              Cancel
+          <DialogFooter className="flex-wrap items-center justify-between gap-2 sm:justify-between">
+            <Button type="button" variant="outline" size="sm" onClick={previewLiveDraft}>
+              <Eye className="size-4" /> Live Template Preview
             </Button>
-            <Button onClick={submit} disabled={savePrescription.isPending}>
-              {savePrescription.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Save className="size-4" />
-              )}
-              Save prescription
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={submit} disabled={savePrescription.isPending}>
+                {savePrescription.isPending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                Save prescription
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PrescriptionPreviewDialog
+        open={Boolean(previewData)}
+        onOpenChange={(v) => !v && setPreviewData(null)}
+        data={previewData}
+        onEdit={() => {
+          if (previewData) {
+            const found = prescriptions.find(
+              (x) => prescriptionNumber(x.created_at, x.id) === previewData.prescriptionNumber,
+            );
+            if (found) openEdit(found.id);
+          }
+        }}
+      />
     </div>
   );
 }

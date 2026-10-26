@@ -9,22 +9,46 @@ import {
   Loader2,
   ShieldCheck,
   UserRound,
-  ChevronDown,
   AlertCircle,
-  Sparkles,
   Mail,
   Lock,
   ConciergeBell,
   CheckCircle2,
+  FileText,
+  Globe,
+  ArrowRight,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import authIllustration from "@/assets/auth-illustration.jpg";
+import doctorIllustration from "@/assets/doctor-illustration.png";
 import { seedDemoAccounts } from "@/lib/demo-accounts.functions";
 import { homeRouteFor, type StaffRole } from "@/hooks/use-role";
+
+const LEFT_FEATURES = [
+  {
+    icon: FileText,
+    title: "AI Transcription",
+    body: "Convert speech to text accurately",
+  },
+  {
+    icon: Stethoscope,
+    title: "Smart SOAP Notes",
+    body: "Extract key medical information",
+  },
+  {
+    icon: Globe,
+    title: "Multilingual Support",
+    body: "Telugu, Hindi and English",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Secure & Private",
+    body: "Hospital-grade data security",
+  },
+];
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -198,42 +222,97 @@ function AuthPage() {
   }
 
   return (
-    <div className="gradient-surface grid min-h-screen lg:grid-cols-2">
-      {/* Illustration — desktop only */}
-      <aside className="relative hidden flex-col justify-between overflow-hidden bg-primary/5 p-12 lg:flex">
-        <Link to="/" className="flex items-center gap-2.5">
-          <span className="gradient-clinical flex size-9 items-center justify-center rounded-xl text-primary-foreground">
-            <Stethoscope className="size-5" />
-          </span>
-          <span className="font-display text-lg font-extrabold">
-            MediScribe<span className="text-primary"> AI</span>
-          </span>
-        </Link>
+    <div className="grid h-screen lg:grid-cols-2 overflow-hidden">
+      {/* Left panel — light blue, logo + features + illustration + tagline */}
+      <aside
+        className="relative hidden lg:block overflow-hidden"
+        style={{ background: "hsl(213 55% 93%)" }}
+      >
+        {/* Large decorative "+" — upper-right area */}
+        <span
+          className="pointer-events-none select-none absolute"
+          style={{ right: "2%", top: "5%", fontSize: "11rem", fontWeight: 100, color: "hsl(210 70% 82% / 0.5)", lineHeight: 1 }}
+        >+</span>
+        <span
+          className="pointer-events-none select-none absolute"
+          style={{ right: "26%", top: "14%", fontSize: "3rem", fontWeight: 100, color: "hsl(210 70% 76% / 0.35)", lineHeight: 1 }}
+        >+</span>
 
-        <div className="mx-auto w-full max-w-md">
-          <img
-            src={authIllustration}
-            alt="Illustration of a doctor reviewing a digital patient record on a tablet"
-            width={1024}
-            height={1280}
-            loading="lazy"
-            className="w-full rounded-3xl object-cover mix-blend-multiply"
-          />
+        {/* Text column — left 0 to right 44%, more room for content */}
+        <div
+          className="absolute top-0 bottom-0 left-0 flex flex-col justify-between px-10 py-8 z-10"
+          style={{ right: "44%" }}
+        >
+          <div>
+            {/* Logo */}
+            <div className="flex items-center gap-3">
+              <span className="gradient-clinical flex size-10 shrink-0 items-center justify-center rounded-2xl text-white shadow-md">
+                <Stethoscope className="size-5" />
+              </span>
+              <div className="leading-snug">
+                <p className="text-sm font-extrabold leading-none tracking-tight">
+                  MediScribe <span className="text-primary">AI</span>
+                </p>
+                <p className="text-[11px] text-slate-500">AI-Powered Clinical Documentation</p>
+              </div>
+            </div>
+
+            {/* Hero heading */}
+            <div className="mt-9">
+              <h1 className="text-[2.1rem] font-extrabold leading-[1.15] text-slate-900 tracking-tight">
+                Documentation<br />that writes itself.
+              </h1>
+              <p className="mt-3 text-[0.82rem] leading-relaxed text-slate-500" style={{ maxWidth: "255px" }}>
+                Record the consultation, and MediScribe AI returns a structured SOAP note,
+                prescription and report — ready for your signature.
+              </p>
+            </div>
+
+            {/* Feature list */}
+            <ul className="mt-8 space-y-4">
+              {LEFT_FEATURES.map((f) => (
+                <li key={f.title} className="flex items-center gap-3">
+                  <span
+                    className="flex size-9 shrink-0 items-center justify-center rounded-2xl text-primary shadow-sm"
+                    style={{ background: "hsl(213 75% 88%)" }}
+                  >
+                    <f.icon className="size-[18px]" />
+                  </span>
+                  <div>
+                    <p className="text-[0.82rem] font-bold text-slate-800 leading-none mb-0.5">{f.title}</p>
+                    <p className="text-[0.72rem] text-slate-500">{f.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Cursive tagline + heart */}
+          <div className="flex items-center gap-3 pb-2">
+            <p
+              style={{ fontFamily: "'Dancing Script', 'Brush Script MT', cursive", fontWeight: 600, fontSize: "1.55rem", color: "hsl(213 80% 45%)" }}
+            >
+              More time for care;
+            </p>
+            <span className="text-2xl" style={{ color: "hsl(213 70% 60%)" }}>♡</span>
+          </div>
         </div>
 
-        <div className="max-w-md">
-          <h2 className="font-display text-2xl font-extrabold leading-tight">
-            Documentation that writes itself.
-          </h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Record the consultation, and MediScribe AI returns a structured SOAP note, prescription
-            and report — ready for your signature.
-          </p>
+        {/* Doctor illustration — shifted further right (left:54%), bottom anchored.
+             Smaller size (78%) + further right keeps speech bubble clear of text.
+             mix-blend-mode:multiply removes the white background against the blue panel. */}
+        <div className="absolute top-0 bottom-0 right-0 pointer-events-none" style={{ left: "54%" }}>
+          <img
+            src={doctorIllustration}
+            alt="Doctor using MediScribe AI"
+            className="absolute bottom-0 right-0 object-contain object-bottom"
+            style={{ height: "78%", width: "auto", maxWidth: "none", mixBlendMode: "multiply" }}
+          />
         </div>
       </aside>
 
-      {/* Form */}
-      <main className="flex flex-col items-center justify-center px-5 py-12">
+      {/* Right panel — sign in form */}
+      <main className="flex flex-col items-center justify-center bg-slate-50 px-5 py-6 overflow-y-auto">
         <Link to="/" className="mb-8 flex items-center gap-2.5 lg:hidden">
           <span className="gradient-clinical flex size-9 items-center justify-center rounded-xl text-primary-foreground">
             <Stethoscope className="size-5" />
@@ -250,7 +329,7 @@ function AuthPage() {
           </p>
 
           <div className="mt-6 space-y-2">
-            <Label>Role</Label>
+            <Label>Select your role</Label>
             <div className="grid grid-cols-3 gap-2">
               <RoleButton
                 active={role === "doctor"}
@@ -345,12 +424,25 @@ function AuthPage() {
                   <Loader2 className="size-4 animate-spin" /> Signing In...
                 </>
               ) : (
-                "Sign in"
+                <>
+                  Sign in <ArrowRight className="size-4" />
+                </>
               )}
             </Button>
           </form>
 
+          {/* OR divider */}
+          <div className="mt-4 flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-xs text-muted-foreground">OR</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
 
+          {/* Authorized staff notice */}
+          <div className="mt-4 flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/40 py-3 text-sm text-muted-foreground">
+            <ShieldCheck className="size-4 shrink-0 text-primary" />
+            Authorized hospital staff only
+          </div>
         </div>
       </main>
     </div>

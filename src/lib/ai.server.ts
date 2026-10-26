@@ -11,7 +11,7 @@ function getCompletionConfig() {
     return {
       url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       key: process.env.GEMINI_API_KEY,
-      model: "gemini-2.0-flash",
+      model: "gemini-3.8-flash",
     };
   }
   return {
@@ -89,7 +89,7 @@ function cleanTranscript(text: string) {
 
 /**
  * Transcribes audio using the Gemini multimodal API (avoids OpenAI Whisper rate limits).
- * Uses gemini-2.0-flash which supports inline audio data.
+ * Uses gemini-3.8-flash which supports inline audio data.
  */
 async function geminiTranscribeAudioBase64(
   audioBase64: string,
@@ -132,7 +132,7 @@ async function geminiTranscribeAudioBase64(
   };
 
   const res = await fetchWithRetry(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -152,6 +152,83 @@ async function geminiTranscribeAudioBase64(
   };
   const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
   return { text: cleanTranscript(text) };
+}
+
+/**
+ * Transcribes audio AND translates to English in a SINGLE Gemini multimodal call.
+ * Returns the original transcript, detected language, and English translation together
+ * — cutting API usage in half compared to calling transcribe and translate separately.
+ */
+export async function geminiTranscribeAndTranslate(
+  audioBase64: string,
+  mimeType: string,
+  minBytes = 2048,
+): Promise<{ original: string; language: string; translation: string }> {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY not set.");
+
+  const bytes = base64ToBytes(audioBase64);
+  if (bytes.byteLength < minBytes) {
+    throw new Error("That recording was too short or silent — please record again.");
+  }
+
+  const supportedMime = mimeType.startsWith("audio/") ? mimeType.split(";")[0] : "audio/wav";
+
+  const prompt = [
+    MEDICAL_PROMPT,
+    "Listen to the audio and respond with JSON only (no markdown, no extra text).",
+    "The JSON must have exactly these three string keys:",
+    '"original" — the verbatim transcription in the spoken language (preserve every word exactly as said).',
+    '"language" — the name of the spoken language in English (e.g. "Telugu", "Hindi", "Tamil", "Kannada", "English").',
+    '"translation" — a faithful English translation of the original. Preserve every symptom, medicine name, dose, duration and instruction exactly. If the speech is already English, copy it unchanged.',
+    "Never add, omit or invent any clinical information. Write [unclear audio] for anything unintelligible.",
+  ].join(" ");
+
+  const body = {
+    contents: [
+      {
+        parts: [
+          { inline_data: { mime_type: supportedMime, data: audioBase64 } },
+          { text: prompt },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0 },
+  };
+
+  const res = await fetchWithRetry(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
+    throw new Error(`Transcription failed (${res.status}). ${detail.slice(0, 200)}`);
+  }
+
+  const json = (await res.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  let raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  // Strip markdown code fences if Gemini wraps the JSON.
+  raw = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```$/, "$1").trim();
+
+  let parsed: { original?: string; language?: string; translation?: string } = {};
+  try { parsed = JSON.parse(raw); } catch { parsed = {}; }
+
+  const original = cleanTranscript(typeof parsed.original === "string" ? parsed.original : "");
+  const language = (typeof parsed.language === "string" && parsed.language.trim()) || "Unknown";
+  const translation = (typeof parsed.translation === "string" ? parsed.translation.trim() : "") || original;
+
+  if (!original) throw new Error("That recording was too short or silent — please record again.");
+
+  return { original, language, translation };
 }
 
 export async function transcribeAudioBase64(

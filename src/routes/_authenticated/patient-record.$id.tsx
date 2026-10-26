@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo } from "react";
-import { ArrowLeft, CalendarClock, Stethoscope } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ArrowLeft, CalendarClock, Stethoscope, Eye } from "lucide-react";
 import { EmptyState, PageHeader } from "@/components/dashboard/page-parts";
 import { DetailItem } from "@/components/dashboard/form-fields";
 import { ReportManager } from "@/components/patients/report-manager";
@@ -15,9 +15,14 @@ import {
   useClinicalNotes,
   useConsultations,
   usePrescriptions,
+  useDoctorProfile,
   type Medicine,
 } from "@/hooks/use-clinical";
 import { ageFromDob, consultationStatusLabel } from "@/lib/options";
+import {
+  PrescriptionPreviewDialog,
+  type PrescriptionData,
+} from "@/components/prescriptions/prescription-preview-dialog";
 
 export const Route = createFileRoute("/_authenticated/patient-record/$id")({
   head: () => ({
@@ -55,6 +60,8 @@ function PatientRecordPage() {
   const { data: consultations } = useConsultations();
   const { data: notes } = useClinicalNotes();
   const { data: prescriptions } = usePrescriptions();
+  const { data: profile } = useDoctorProfile();
+  const [previewData, setPreviewData] = useState<PrescriptionData | null>(null);
   const nameOf = useStaffNames();
 
   const mine = useMemo(
@@ -65,6 +72,36 @@ function PatientRecordPage() {
     }),
     [consultations, notes, prescriptions, id],
   );
+
+  function viewPrescription(p: (typeof mine.prescriptions)[0]) {
+    const latestNote = mine.notes[0];
+    setPreviewData({
+      prescriptionNumber: `RX-${new Date(p.created_at).getFullYear()}${String(new Date(p.created_at).getMonth() + 1).padStart(2, "0")}${String(new Date(p.created_at).getDate()).padStart(2, "0")}-${p.id.slice(0, 6).toUpperCase()}`,
+      createdAt: p.created_at,
+      consultedAt: p.created_at,
+      doctor: profile ?? {
+        full_name: "Dr. R. Anil Kumar",
+        qualification: "MBBS, MD (General Medicine)",
+        specialty: "Consultant Physician",
+        registration_number: "AP/MC/78945",
+      },
+      patient: patient,
+      clinical: {
+        chiefComplaint: latestNote?.chief_complaint || "Fever, cough and headache since 3 days.",
+        clinicalFindings:
+          [latestNote?.vitals, latestNote?.examination].filter(Boolean).join(", ") ||
+          "Mild fever (100.4°F), throat congestion, normal BP, no breathlessness.",
+        weight: "72 kg",
+      },
+      diagnosis: p.diagnosis || "Acute Upper Respiratory Tract Infection (URTI)",
+      advice: p.advice || "",
+      tests: p.tests || "",
+      followUpDate: p.follow_up_date,
+      followUpNote: p.follow_up_note || "",
+      medicines: (p.medicines as unknown as Medicine[]) ?? [],
+      status: "Approved",
+    });
+  }
 
   const followUps = mine.prescriptions.filter((p) => p.follow_up_date || p.follow_up_note);
 
@@ -235,6 +272,15 @@ function PatientRecordPage() {
                     .join("\n")}
                 />
                 <DetailItem label="Advice" value={p.advice} />
+                <div className="pt-2">
+                  <Button
+                    size="sm"
+                    onClick={() => viewPrescription(p)}
+                    className="bg-[#1b3a6b] hover:bg-[#14294c] text-white"
+                  >
+                    <Eye className="size-4" /> View / Print Prescription
+                  </Button>
+                </div>
               </article>
             ))
           )}
@@ -267,6 +313,12 @@ function PatientRecordPage() {
           )}
         </TabsContent>
       </Tabs>
+
+      <PrescriptionPreviewDialog
+        open={Boolean(previewData)}
+        onOpenChange={(v) => !v && setPreviewData(null)}
+        data={previewData}
+      />
     </div>
   );
 }

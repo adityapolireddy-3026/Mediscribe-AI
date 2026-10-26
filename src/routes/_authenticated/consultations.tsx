@@ -38,6 +38,7 @@ import {
   generateSoapNote,
   translateTranscript,
   transcribeLiveSegment,
+  transcribeAndTranslateAudio,
 } from "@/lib/ai.functions";
 import { blobToBase64, VoiceRecorder } from "@/lib/audio-recorder";
 import { MicPulse, Waveform, formatDuration } from "@/components/consultation/recorder-visuals";
@@ -111,11 +112,22 @@ const STAGE_LABEL: Record<Exclude<Stage, "idle">, string> = {
   ready: "Ready",
 };
 
+const SUPPORTED_SPEECH_LANGUAGES = [
+  { code: "te-IN", label: "Telugu (తెలుగు)" },
+  { code: "en-US", label: "English (US / UK)" },
+  { code: "hi-IN", label: "Hindi (हिंदी)" },
+  { code: "ta-IN", label: "Tamil (தமிழ்)" },
+  { code: "kn-IN", label: "Kannada (కన్నడ)" },
+  { code: "ml-IN", label: "Malayalam (മലയാളം)" },
+  { code: "mr-IN", label: "Marathi (మరాఠీ)" },
+];
+
 function ConsultationPage() {
   const navigate = useNavigate();
   const { data: patients = [], isLoading } = usePatients("");
   const { data: profile } = useDoctorProfile();
   const [patientId, setPatientId] = useState<string>("");
+  const [speechLanguage, setSpeechLanguage] = useState<string>("te-IN");
   const [levels, setLevels] = useState<number[]>([]);
   const [seconds, setSeconds] = useState(0);
   const [recording, setRecording] = useState(false);
@@ -145,11 +157,19 @@ function ConsultationPage() {
   const translationRef = useRef("");
   /** The captured audio, uploaded to storage once the visit is documented. */
   const audioBlobRef = useRef<Blob | null>(null);
+  /** Browser Web Speech API instance for free live transcript display. */
+  const webSpeechRef = useRef<any>(null);
+  /** Accumulates finalised Web Speech text so words aren't duplicated. */
+  const liveTextRef = useRef("");
+  /** Keeps track of text already translated to avoid duplicate live translation calls. */
+  const lastTranslatedTextRef = useRef("");
+  const translateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const runTranscribe = useServerFn(transcribeAudio);
   const runTranslate = useServerFn(translateTranscript);
   const runGenerate = useServerFn(generateSoapNote);
   const runLiveSegment = useServerFn(transcribeLiveSegment);
+  const runTranscribeAndTranslate = useServerFn(transcribeAndTranslateAudio);
   const createConsultation = useCreateConsultation();
   const updateConsultation = useUpdateConsultation();
   const saveNote = useSaveClinicalNote();
@@ -170,6 +190,33 @@ function ConsultationPage() {
     };
   }, []);
 
+  /** Automatic fast live text translation to English while user is speaking. */
+  useEffect(() => {
+    if (!recording || !transcript.trim()) return;
+    const currentText = transcript.trim();
+    if (currentText.length - lastTranslatedTextRef.current.length >= 6) {
+      if (translateTimerRef.current) clearTimeout(translateTimerRef.current);
+      translateTimerRef.current = setTimeout(async () => {
+        try {
+          const out = await runTranslate({ data: { transcript: currentText } });
+          if (out?.translation) {
+            setTranslation(out.translation);
+            translationRef.current = out.translation;
+            if (out.language && out.language !== "Unknown") {
+              setLanguage(out.language);
+            }
+            lastTranslatedTextRef.current = currentText;
+          }
+        } catch {
+          // Ignore live interim translation errors quietly
+        }
+      }, 1200);
+    }
+    return () => {
+      if (translateTimerRef.current) clearTimeout(translateTimerRef.current);
+    };
+  }, [transcript, recording, runTranslate]);
+
   function resetClinical() {
     setNote(null);
     setNoteId(null);
@@ -178,36 +225,49 @@ function ConsultationPage() {
   }
 
 
-  /** Transcribe → detect language → translate to English. */
+  /**
+   * Transcribes audio AND translates to English in ONE Gemini call.
+   * Sets original transcript, detected language, and English translation atomically.
+   */
   async function processAudio(blob: Blob) {
     resetClinical();
     setTranslation("");
     setLanguage("");
     setTranscriptionStatus("live");
     try {
-      setStage("detecting");
-      const audioBase64 = await blobToBase64(blob);
       setStage("transcribing");
-      const result = await runTranscribe({
+      const audioBase64 = await blobToBase64(blob);
+      const result = await runTranscribeAndTranslate({
         data: { audioBase64, mimeType: blob.type || "audio/wav" },
       });
-      const text = result.text?.trim() ?? "";
-      if (!text) {
+      if (!result.original) {
         setStage("idle");
         setTranscriptionStatus("failed");
-        toast.error("Unable to transcribe the audio. Please try again or upload another audio file.");
+        toast.error("Unable to transcribe the audio. Please try again.");
         return null;
       }
-      setTranscript(text);
+      setTranscript(result.original);
+      const detectedLang = result.language !== "Unknown" ? result.language : "";
+      setLanguage(detectedLang);
+      setTranslation(result.translation);
+      translationRef.current = result.translation;
       setTranscriptionStatus("complete");
-      return await translateText(text);
+      setStage("ready");
+      if (detectedLang) {
+        toast.success(`Language detected: ${detectedLang}`, {
+          description: "English translation ready.",
+        });
+      } else {
+        toast.success("Transcription and translation complete.");
+      }
+      return result.translation;
     } catch (error) {
       setStage("idle");
       setTranscriptionStatus("failed");
       toast.error(
         error instanceof Error
           ? error.message
-          : "Unable to transcribe the audio. Please try again or upload another audio file.",
+          : "Unable to transcribe the audio. Please try again.",
       );
       return null;
     }
@@ -290,17 +350,18 @@ function ConsultationPage() {
 
     setStage("connecting");
     try {
-      const recorder = new VoiceRecorder({
-        onLevels: setLevels,
-        // Live transcription is disabled to prevent OpenAI rate limits (3 requests/minute).
-        // onSegment: enqueueSegment,
-      });
+      // Audio recorder — captures full WAV for final Gemini transcription at the end.
+      // onSegment is intentionally disabled: Web Speech API handles live display for free,
+      // eliminating per-segment Gemini calls that cause rate-limit errors.
+      const recorder = new VoiceRecorder({ onLevels: setLevels });
 
       await recorder.start();
       recognitionRef.current = recorder;
       liveRef.current = true;
       liveLinesRef.current = 0;
       audioBlobRef.current = null;
+      liveTextRef.current = "";
+      lastTranslatedTextRef.current = "";
       setPending(0);
       setSeconds(0);
       setTranscript("");
@@ -313,7 +374,39 @@ function ConsultationPage() {
       setPaused(false);
       setStage("listening");
       setTranscriptionStatus("live");
-      toast.success("Live transcription started (Multilingual auto-detect)");
+
+      // Start the browser's built-in Web Speech API for instant live text (no API cost).
+      try {
+        const SpeechRec =
+          (window as any).SpeechRecognition ||
+          (window as any).webkitSpeechRecognition;
+        if (SpeechRec) {
+          const rec = new SpeechRec();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = speechLanguage; // e.g. "te-IN" for Telugu speech recognition
+          rec.onresult = (e: any) => {
+            let interim = "";
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+              if (e.results[i].isFinal) {
+                liveTextRef.current += e.results[i][0].transcript + " ";
+              } else {
+                interim = e.results[i][0].transcript;
+              }
+            }
+            setTranscript(liveTextRef.current + interim);
+          };
+          rec.onerror = () => {};
+          // Auto-restart if the browser stops it mid-session.
+          rec.onend = () => { if (liveRef.current) { try { rec.start(); } catch {} } };
+          rec.start();
+          webSpeechRef.current = rec;
+        }
+      } catch {
+        // Web Speech not supported — Gemini will handle transcription at the end.
+      }
+
+      toast.success("Live transcription started — speak naturally");
     } catch (error) {
       setStage("idle");
       setTranscriptionStatus("failed");
@@ -335,11 +428,18 @@ function ConsultationPage() {
   async function stopRecording() {
     const recorder = recognitionRef.current;
     if (!recorder) return;
-    
+
     setRecording(false);
     setPaused(false);
     setLevels([]);
-    liveRef.current = false;
+    liveRef.current = false; // also stops Web Speech auto-restart
+
+    // Stop Web Speech API cleanly.
+    if (webSpeechRef.current) {
+      try { webSpeechRef.current.stop(); } catch {}
+      webSpeechRef.current = null;
+    }
+
     setStage("transcribing");
 
     try {
@@ -347,28 +447,10 @@ function ConsultationPage() {
       audioBlobRef.current = blob;
       recognitionRef.current = null;
 
-      // Wait for any pending live segments to finish translating
-      await queueRef.current;
-
-      setStage("ready");
-      setTranscriptionStatus("complete");
-      toast.success("Transcription finalised");
-      
-      // If live transcription was disabled or failed, process the entire audio now.
-      if (!translationRef.current.trim() && !transcript.trim()) {
-        const english = await processAudio(blob);
-        if (english) await generateNotes(english);
-      } else {
-        setTimeout(async () => {
-           const english = translationRef.current.trim();
-           if (english) await generateNotes(english);
-           else if (transcript.trim()) {
-             // Fallback in case of segment API errors but we somehow have transcript
-             const fallbackEnglish = await translateText(transcript.trim());
-             if (fallbackEnglish) await generateNotes(fallbackEnglish);
-           }
-        }, 500);
-      }
+      // Use Gemini once for a medically-accurate final transcript + English translation.
+      // This is the only API call — no rate-limit risk.
+      const english = await processAudio(blob);
+      if (english) await generateNotes(english);
     } catch (error) {
       setStage("idle");
       setTranscriptionStatus("failed");
@@ -707,6 +789,23 @@ function ConsultationPage() {
             </p>
             <Waveform levels={levels} active={recording && !paused} />
 
+            <div className="flex items-center gap-2 rounded-xl bg-muted/60 px-3.5 py-1.5 text-xs text-muted-foreground">
+              <Languages className="size-4 text-primary shrink-0" />
+              <span className="font-semibold text-foreground">Spoken Language:</span>
+              <Select value={speechLanguage} onValueChange={setSpeechLanguage} disabled={recording || busy}>
+                <SelectTrigger className="h-7 w-40 border-none bg-background shadow-sm text-xs font-semibold">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SUPPORTED_SPEECH_LANGUAGES.map((lang) => (
+                    <SelectItem key={lang.code} value={lang.code} className="text-xs">
+                      {lang.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="flex flex-wrap items-center justify-center gap-2">
               {!recording ? (
                 <Button onClick={startRecording} disabled={busy}>
@@ -774,17 +873,20 @@ function ConsultationPage() {
                 … recognising speech ({pending} {pending === 1 ? "phrase" : "phrases"} in progress)
               </p>
             )}
-            <div className="flex justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void translateText(transcript.trim())}
-                disabled={busy || !transcript.trim()}
-              >
-                <RefreshCw className="size-4" />
-                {translation ? "Re-translate to English" : "Translate to English"}
-              </Button>
-            </div>
+            {/* Manual re-translate — only shown when user has edited the transcript by hand */}
+            {transcript.trim() && !recording && (
+              <div className="flex justify-end">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void translateText(transcript.trim())}
+                  disabled={busy}
+                >
+                  <RefreshCw className="size-4" />
+                  {translation ? "Re-translate to English" : "Translate to English"}
+                </Button>
+              </div>
+            )}
           </div>
 
           <div className="surface-card space-y-3 p-5">
