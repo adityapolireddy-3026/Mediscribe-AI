@@ -386,16 +386,41 @@ DROP TRIGGER IF EXISTS patient_reports_updated_at ON public.patient_reports;
 CREATE TRIGGER patient_reports_updated_at BEFORE UPDATE ON public.patient_reports
   FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
--- Patient access: reception registers, clinicians read
+-- Patient access: reception registers, doctors see only assigned patients
 DROP POLICY IF EXISTS "Doctors manage own patients" ON public.patients;
 DROP POLICY IF EXISTS "Admins read all patients" ON public.patients;
+DROP POLICY IF EXISTS "Staff read patients" ON public.patients;
+DROP POLICY IF EXISTS "Admins and reception read patients" ON public.patients;
+DROP POLICY IF EXISTS "Doctors read assigned patients" ON public.patients;
 
-CREATE POLICY "Staff read patients" ON public.patients
+CREATE POLICY "Admins and reception read patients" ON public.patients
   FOR SELECT TO authenticated
   USING (
     private.has_role(auth.uid(), 'admin'::app_role)
-    OR private.has_role(auth.uid(), 'doctor'::app_role)
     OR private.has_role(auth.uid(), 'receptionist'::app_role)
+  );
+
+CREATE POLICY "Doctors read assigned patients" ON public.patients
+  FOR SELECT TO authenticated
+  USING (
+    private.has_role(auth.uid(), 'doctor'::app_role)
+    AND doctor_id = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "Reception reads doctor roles" ON public.user_roles;
+CREATE POLICY "Reception reads doctor roles" ON public.user_roles
+  FOR SELECT TO authenticated
+  USING (
+    private.has_role(auth.uid(), 'receptionist'::app_role)
+    AND role = 'doctor'::app_role
+  );
+
+DROP POLICY IF EXISTS "Reception reads doctor profiles" ON public.profiles;
+CREATE POLICY "Reception reads doctor profiles" ON public.profiles
+  FOR SELECT TO authenticated
+  USING (
+    private.has_role(auth.uid(), 'receptionist'::app_role)
+    AND private.has_role(id, 'doctor'::app_role)
   );
 
 CREATE POLICY "Reception registers patients" ON public.patients
@@ -455,6 +480,20 @@ CREATE POLICY "Admins delete roles" ON public.user_roles
   USING (private.has_role(auth.uid(), 'admin'::app_role));
 
 -- Private storage for patient report files
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'patient-reports',
+  'patient-reports',
+  false,
+  15728640,
+  ARRAY['application/pdf', 'image/jpeg', 'image/png']
+)
+ON CONFLICT (id) DO UPDATE
+SET
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
 CREATE POLICY "Staff read patient report files" ON storage.objects
   FOR SELECT TO authenticated
   USING (

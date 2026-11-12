@@ -34,6 +34,17 @@ async function assertAdmin(context: { supabase: any; userId: string }) {
   if (!data || data.length === 0) throw new Error("Administrator access required");
 }
 
+/** Reception or admin may list doctors when assigning a patient. */
+async function assertReceptionOrAdmin(context: { supabase: any; userId: string }) {
+  const { data, error } = await context.supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", context.userId)
+    .in("role", ["admin", "receptionist"]);
+  if (error) throw new Error(error.message);
+  if (!data || data.length === 0) throw new Error("Reception or administrator access required");
+}
+
 function clean(input: StaffProfileInput) {
   return {
     full_name: input.full_name.trim(),
@@ -58,6 +69,34 @@ function clean(input: StaffProfileInput) {
     status: input.status === "inactive" ? "inactive" : "active",
   };
 }
+
+/** Active doctors for the patient-assignment dropdown. */
+export const listActiveDoctors = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertReceptionOrAdmin(context);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const [{ data: roles, error: rolesError }, { data: profiles, error }] = await Promise.all([
+      supabaseAdmin.from("user_roles").select("user_id, role").eq("role", "doctor"),
+      supabaseAdmin
+        .from("profiles")
+        .select("id, full_name, email, specialty, status")
+        .order("full_name", { ascending: true }),
+    ]);
+    if (rolesError) throw new Error(rolesError.message);
+    if (error) throw new Error(error.message);
+
+    const doctorIds = new Set((roles ?? []).map((r) => r.user_id as string));
+    return (profiles ?? [])
+      .filter((p) => doctorIds.has(p.id) && (p.status ?? "active") === "active")
+      .map((p) => ({
+        id: p.id,
+        full_name: p.full_name?.trim() || p.email || "Doctor",
+        specialty: p.specialty ?? null,
+        status: p.status ?? "active",
+      }));
+  });
 
 /** Admin-only: creates a doctor or receptionist login plus their staff profile. */
 export const createStaffAccount = createServerFn({ method: "POST" })

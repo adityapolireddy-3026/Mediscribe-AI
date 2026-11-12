@@ -7,6 +7,7 @@ import {
   updateStaffAccount,
   setStaffStatus,
   deleteStaffAccount,
+  listActiveDoctors,
   type StaffProfileInput,
   type StaffRole,
 } from "@/lib/staff.functions";
@@ -85,6 +86,33 @@ export function useStaffMutations(role: StaffRole) {
       onSuccess: invalidate,
     }),
   };
+}
+
+export type DoctorOption = {
+  id: string;
+  full_name: string;
+  specialty: string | null;
+  status: string | null;
+};
+
+/** Active doctors available for patient assignment (reception / admin). */
+export function useDoctors(enabled = true) {
+  const listDoctors = useServerFn(listActiveDoctors);
+  return useQuery({
+    enabled,
+    queryKey: ["doctors-for-assignment"],
+    staleTime: 60_000,
+    retry: 1,
+    queryFn: async (): Promise<DoctorOption[]> => {
+      try {
+        const doctors = await listDoctors();
+        return doctors ?? [];
+      } catch (err) {
+        console.error("Failed to load doctors for assignment", err);
+        throw err instanceof Error ? err : new Error("Could not load doctor list");
+      }
+    },
+  });
 }
 
 /** Map of staff id to display name; only rows the signed-in account may read resolve. */

@@ -5,11 +5,12 @@ import type { Tables, TablesInsert } from "@/integrations/supabase/types";
 export type Patient = Tables<"patients">;
 export type PatientInput = Omit<
   TablesInsert<"patients">,
-  "doctor_id" | "id" | "uhid" | "registered_by" | "created_at" | "updated_at"
+  "id" | "uhid" | "registered_by" | "created_at" | "updated_at"
 >;
 
 export const emptyPatient: PatientInput = {
   full_name: "",
+  doctor_id: null,
   gender: "",
   date_of_birth: null,
   age: null,
@@ -38,17 +39,32 @@ export function usePatients(search = "") {
   return useQuery({
     queryKey: ["patients"],
     queryFn: async (): Promise<Patient[]> => {
-      const { data, error } = await supabase
-        .from("patients")
-        .select("*")
-        .order("created_at", { ascending: false });
+      const { data: auth } = await supabase.auth.getUser();
+      const uid = auth.user?.id;
+
+      let query = supabase.from("patients").select("*").order("created_at", { ascending: false });
+
+      // Until/alongside RLS, doctors only receive patients assigned to them.
+      if (uid) {
+        const { data: roles } = await supabase
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", uid);
+        const isDoctorOnly =
+          (roles ?? []).some((r) => r.role === "doctor") &&
+          !(roles ?? []).some((r) => r.role === "admin" || r.role === "receptionist");
+        if (isDoctorOnly) query = query.eq("doctor_id", uid);
+      }
+
+      const { data, error } = await query;
       if (error) throw error;
-      return data ?? [];
+      return Array.isArray(data) ? data : [];
     },
     select: (rows) => {
+      const list = Array.isArray(rows) ? rows : [];
       const q = search.trim().toLowerCase();
-      if (!q) return rows;
-      return rows.filter((p) =>
+      if (!q) return list;
+      return list.filter((p) =>
         [p.uhid, p.full_name, p.phone, p.email, p.medical_history, p.blood_group, p.city]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q)),
@@ -62,11 +78,23 @@ export function usePatient(id: string | undefined) {
     enabled: !!id,
     queryKey: ["patient", id],
     queryFn: async (): Promise<Patient | null> => {
-      const { data, error } = await supabase
-        .from("patients")
-        .select("*")
-        .eq("id", id!)
-        .maybeSingle();
+      const { data: auth } = await supabase.auth.getUser();
+      const uid = auth.user?.id;
+
+      let query = supabase.from("patients").select("*").eq("id", id!);
+
+      if (uid) {
+        const { data: roles } = await supabase
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", uid);
+        const isDoctorOnly =
+          (roles ?? []).some((r) => r.role === "doctor") &&
+          !(roles ?? []).some((r) => r.role === "admin" || r.role === "receptionist");
+        if (isDoctorOnly) query = query.eq("doctor_id", uid);
+      }
+
+      const { data, error } = await query.maybeSingle();
       if (error) throw error;
       return data;
     },

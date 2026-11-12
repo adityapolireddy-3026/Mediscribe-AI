@@ -25,10 +25,12 @@ import {
   type Patient,
   type PatientInput,
 } from "@/hooks/use-patients";
+import { useDoctors } from "@/hooks/use-staff";
 
 function toForm(p: Patient): PatientInput {
   return {
     full_name: p.full_name,
+    doctor_id: p.doctor_id ?? null,
     gender: p.gender ?? "",
     date_of_birth: p.date_of_birth ?? null,
     age: p.age,
@@ -54,6 +56,15 @@ function toForm(p: Patient): PatientInput {
   };
 }
 
+function doctorLabel(
+  id: string,
+  doctors: { id: string; full_name: string; specialty: string | null }[],
+) {
+  const doctor = doctors.find((d) => d.id === id);
+  if (!doctor) return "Selected doctor";
+  return doctor.specialty ? `${doctor.full_name} (${doctor.specialty})` : doctor.full_name;
+}
+
 /** Patient registration / edit dialog used by reception and administrators. */
 export function PatientFormDialog({
   open,
@@ -68,6 +79,7 @@ export function PatientFormDialog({
 }) {
   const [form, setForm] = useState<PatientInput>(emptyPatient);
   const save = useSavePatient();
+  const { data: doctors = [], isLoading: doctorsLoading } = useDoctors(open);
 
   useEffect(() => {
     if (open) setForm(patient ? toForm(patient) : emptyPatient);
@@ -77,6 +89,10 @@ export function PatientFormDialog({
     setForm((f) => ({ ...f, [key]: value }));
 
   const derivedAge = ageFromDob(form.date_of_birth ?? null);
+  const doctorOptions =
+    form.doctor_id && !doctors.some((d) => d.id === form.doctor_id)
+      ? [...doctors, { id: form.doctor_id, full_name: "Assigned doctor", specialty: null, status: "active" }]
+      : doctors;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -88,12 +104,17 @@ export function PatientFormDialog({
       toast.error("Please select the patient's gender");
       return;
     }
+    if (!form.doctor_id) {
+      toast.error("Please select a doctor for this patient");
+      return;
+    }
     try {
       await save.mutateAsync({
         id: patient?.id,
         values: {
           ...form,
           full_name: form.full_name.trim(),
+          doctor_id: form.doctor_id,
           age: derivedAge ?? form.age ?? null,
         },
       });
@@ -132,6 +153,15 @@ export function PatientFormDialog({
                 value={form.gender ?? ""}
                 onChange={(v) => set("gender", v)}
                 options={GENDERS}
+              />
+              <SelectField
+                label="Doctor name"
+                required
+                value={form.doctor_id ?? ""}
+                onChange={(v) => set("doctor_id", v)}
+                options={doctorOptions.map((d) => d.id)}
+                labelFor={(id) => doctorLabel(id, doctorOptions)}
+                placeholder={doctorsLoading ? "Loading doctors…" : "Select doctor…"}
               />
               <TextField
                 label="Date of birth"

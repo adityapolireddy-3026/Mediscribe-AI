@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Eye, Pencil, Search, Stethoscope, Trash2, UserPlus, Users } from "lucide-react";
+import { Eye, Pencil, Search, Stethoscope, Trash2, Upload, UserPlus, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { EmptyState, PageHeader } from "@/components/dashboard/page-parts";
 import { PatientFormDialog } from "@/components/patients/patient-form";
@@ -31,6 +31,7 @@ import { useDeletePatient, usePatients, type Patient } from "@/hooks/use-patient
 import { useStaffNames } from "@/hooks/use-staff";
 import { useRole } from "@/hooks/use-role";
 import { ageFromDob } from "@/lib/options";
+import { ReportUploadDialog } from "@/components/patients/report-manager";
 
 export const Route = createFileRoute("/_authenticated/patients")({
   head: () => ({
@@ -61,9 +62,10 @@ function PatientsPage() {
   const [status, setStatus] = useState("all");
   const [editing, setEditing] = useState<Patient | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [uploadTarget, setUploadTarget] = useState<Patient | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Patient | null>(null);
 
-  const { data, isLoading } = usePatients(search);
+  const { data, isLoading, isError, error, refetch } = usePatients(search);
   const del = useDeletePatient();
   const nameOf = useStaffNames();
 
@@ -76,11 +78,13 @@ function PatientsPage() {
       ]);
       const map: Record<string, { consultations: number; reports: number; doctor?: string }> = {};
       for (const c of consultations ?? []) {
+        if (!c?.patient_id) continue;
         const entry = (map[c.patient_id] ??= { consultations: 0, reports: 0 });
         entry.consultations += 1;
         entry.doctor ??= c.doctor_id ?? undefined;
       }
       for (const r of reports ?? []) {
+        if (!r?.patient_id) continue;
         const entry = (map[r.patient_id] ??= { consultations: 0, reports: 0 });
         entry.reports += 1;
       }
@@ -89,12 +93,33 @@ function PatientsPage() {
   });
 
   const rows = useMemo(() => {
-    const list = data ?? [];
+    const list = Array.isArray(data) ? data : [];
     if (status === "all") return list;
     return list.filter((p) => (p.status ?? "active") === status);
   }, [data, status]);
 
   if (roleLoading || isLoading) return <Skeleton className="h-64 w-full rounded-2xl" />;
+
+  if (isError) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : error && typeof error === "object" && "message" in error
+          ? String((error as { message: unknown }).message)
+          : "Could not load patients";
+    return (
+      <EmptyState
+        icon={Users}
+        title="Patients could not be loaded"
+        body={message}
+        action={
+          <Button type="button" onClick={() => refetch()}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  }
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -209,9 +234,20 @@ function PatientsPage() {
                           </Button>
                           {role === "doctor" && (
                             <Button asChild size="sm">
-                              <Link to="/consultations">
+                              <Link to="/consultations" search={{ patientId: p.id }}>
                                 <Stethoscope className="size-4" /> Consult
                               </Link>
+                            </Button>
+                          )}
+                          {canManage && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setUploadTarget(p);
+                              }}
+                            >
+                              <Upload className="size-4" /> Docs
                             </Button>
                           )}
                           {canManage && (
@@ -242,12 +278,29 @@ function PatientsPage() {
         </div>
       )}
 
-      <PatientFormDialog
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        patient={editing}
-        registeredByName={editing ? nameOf(editing.registered_by, fullName || "Reception") : fullName || "Reception"}
-      />
+      {uploadTarget && (
+        <ReportUploadDialog
+          patientId={uploadTarget.id}
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setUploadTarget(null);
+          }}
+        />
+      )}
+
+      {formOpen ? (
+        <PatientFormDialog
+          open={formOpen}
+          onOpenChange={(open) => {
+            setFormOpen(open);
+            if (!open) setEditing(null);
+          }}
+          patient={editing}
+          registeredByName={
+            editing ? nameOf(editing.registered_by, fullName || "Reception") : fullName || "Reception"
+          }
+        />
+      ) : null}
 
       <AlertDialog open={!!pendingDelete} onOpenChange={(o) => !o && setPendingDelete(null)}>
         <AlertDialogContent>
