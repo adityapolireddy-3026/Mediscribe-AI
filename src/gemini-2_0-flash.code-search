@@ -1,0 +1,17 @@
+# Query: gemini-2.0-flash
+# ContextLines: 1
+
+3 results - 1 file
+
+src\lib\ai.server.ts:
+   13        key: process.env.GEMINI_API_KEY,
+   14:       model: "gemini-3.8-flash",
+   15      };
+
+   91   * Transcribes audio using the Gemini multimodal API (avoids OpenAI Whisper rate limits).
+   92:  * Uses gemini-2.0-flash which supports inline audio data.
+   93   */
+
+  134    const res = await fetchWithRetry(
+  135:     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+  136      {

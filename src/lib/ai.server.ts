@@ -1,5 +1,17 @@
 const GATEWAY = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 
+/**
+ * Capacity-aware model preference order for native generateContent.
+ * gemini-3.8-flash is often overloaded (503) for new projects, so it is last.
+ * Lite models keep live translation + short transcripts fast and cheap.
+ */
+const GEMINI_MODELS = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
+] as const;
+
 function apiKey() {
   const key = process.env.OPENAI_API_KEY || process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("AI is not configured for this project. Please add OPENAI_API_KEY to your .env file.");
@@ -7,18 +19,92 @@ function apiKey() {
 }
 
 function getCompletionConfig() {
-  if (process.env.GEMINI_API_KEY) {
-    return {
-      url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      key: process.env.GEMINI_API_KEY,
-      model: "gemini-3.8-flash",
-    };
-  }
+  // Prefer OpenAI (or gateway) for the OpenAI-compat path. Gemini traffic goes through
+  // the native generateContent helpers below — the Gemini OpenAI-compat endpoint also
+  // returns 503 when Flash capacity is tight.
   return {
     url: `${GATEWAY}/chat/completions`,
     key: apiKey(),
     model: "gpt-4o-mini",
   };
+}
+
+function geminiKey() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY not set.");
+  return key;
+}
+
+function geminiGenerateUrl(model: string) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey()}`;
+}
+
+/**
+ * Posts to Gemini generateContent, failing over across GEMINI_MODELS on
+ * overload (503), rate limits (429), or model-not-found (404).
+ */
+async function geminiGenerateContentRequest(body: object): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (const model of GEMINI_MODELS) {
+    // 2 attempts per model, then fail over quickly — better UX than waiting on one overloaded Flash.
+    const res = await fetchWithRetry(
+      geminiGenerateUrl(model),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      2,
+    );
+    if (res.ok) return res;
+    if (res.status === 503 || res.status === 429 || res.status === 404) {
+      lastRes = res;
+      continue;
+    }
+    return res;
+  }
+  return lastRes ?? new Response(JSON.stringify({ error: "No Gemini model available" }), { status: 503 });
+}
+
+function extractGeminiText(json: {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+}): string {
+  const parts = json.candidates?.[0]?.content?.parts ?? [];
+  // Prefer non-thought parts when thinking models return both.
+  const textPart = parts.find((p) => p.text && !p.thought) ?? parts.find((p) => p.text);
+  return textPart?.text ?? "";
+}
+
+/**
+ * Calls the native Gemini generateContent REST API for text-only tasks.
+ * Avoids the OpenAI-compat endpoint which frequently 503s under Flash demand.
+ */
+async function geminiGenerateContent(
+  prompt: { system: string; user: string },
+): Promise<string> {
+  const body = {
+    system_instruction: { parts: [{ text: prompt.system }] },
+    contents: [{ role: "user", parts: [{ text: prompt.user }] }],
+    generationConfig: { temperature: 0, responseMimeType: "application/json" },
+  };
+
+  const res = await geminiGenerateContentRequest(body);
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
+    if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
+    throw new Error(`AI request failed (${res.status}). ${detail.slice(0, 200)}`);
+  }
+
+  const json = (await res.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+  };
+  let raw = extractGeminiText(json) || "{}";
+  // Strip markdown code fences in case the model wraps the JSON.
+  raw = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```$/, "$1").trim();
+  return raw;
 }
 
 function base64ToBytes(b64: string) {
@@ -44,24 +130,29 @@ export const MEDICAL_PROMPT = [
   "Do not guess unclear words. Write [unclear audio] where the audio cannot be understood. Never invent medical details.",
 ].join(" ");
 
-/** Retries only transient gateway failures (rate limits and upstream errors). */
-async function fetchWithRetry(url: string, init: RequestInit, attempts = 3) {
+/**
+ * Retries transient gateway failures (429 rate limits, 503 overload, >=500 server errors)
+ * with exponential backoff. Attempts: 5, max wait per step: 16 s.
+ */
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 5) {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const res = await fetch(url, init);
       if (res.status === 429 || res.status >= 500) {
-        if (attempt === attempts - 1) return res;
+        if (attempt === attempts - 1) return res; // surface the error response on the last attempt
         const retryAfter = Number(res.headers.get("retry-after"));
-        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 600 * 2 ** attempt;
-        await new Promise((r) => setTimeout(r, Math.min(waitMs, 4000)));
+        // Exponential backoff: 1s, 2s, 4s, 8s … capped at 16 s. Honour Retry-After if present.
+        const baseWait = 1000 * 2 ** attempt;
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : baseWait;
+        await new Promise((r) => setTimeout(r, Math.min(waitMs, 16_000)));
         continue;
       }
       return res;
     } catch (error) {
       lastError = error;
       if (attempt === attempts - 1) break;
-      await new Promise((r) => setTimeout(r, 400 * 2 ** attempt));
+      await new Promise((r) => setTimeout(r, Math.min(500 * 2 ** attempt, 8_000)));
     }
   }
   throw lastError instanceof Error
@@ -89,15 +180,14 @@ function cleanTranscript(text: string) {
 
 /**
  * Transcribes audio using the Gemini multimodal API (avoids OpenAI Whisper rate limits).
- * Uses gemini-3.8-flash which supports inline audio data.
+ * Fails over across GEMINI_MODELS when a Flash endpoint is overloaded.
  */
 async function geminiTranscribeAudioBase64(
   audioBase64: string,
   mimeType: string,
   opts: { language?: string; minBytes?: number; prompt?: string } = {},
 ): Promise<{ text: string }> {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY not set.");
+  geminiKey();
 
   const bytes = base64ToBytes(audioBase64);
   if (bytes.byteLength < (opts.minBytes ?? 2048)) {
@@ -131,26 +221,20 @@ async function geminiTranscribeAudioBase64(
     generationConfig: { temperature: 0 },
   };
 
-  const res = await fetchWithRetry(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  const res = await geminiGenerateContentRequest(body);
 
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
     if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
     throw new Error(`Transcription failed (${res.status}). ${detail.slice(0, 200)}`);
   }
 
   const json = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
   };
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  const text = extractGeminiText(json);
   return { text: cleanTranscript(text) };
 }
 
@@ -164,8 +248,7 @@ export async function geminiTranscribeAndTranslate(
   mimeType: string,
   minBytes = 2048,
 ): Promise<{ original: string; language: string; translation: string }> {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY not set.");
+  geminiKey();
 
   const bytes = base64ToBytes(audioBase64);
   if (bytes.byteLength < minBytes) {
@@ -193,29 +276,23 @@ export async function geminiTranscribeAndTranslate(
         ],
       },
     ],
-    generationConfig: { temperature: 0 },
+    generationConfig: { temperature: 0, responseMimeType: "application/json" },
   };
 
-  const res = await fetchWithRetry(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  const res = await geminiGenerateContentRequest(body);
 
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
     if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
     throw new Error(`Transcription failed (${res.status}). ${detail.slice(0, 200)}`);
   }
 
   const json = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
   };
-  let raw = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  let raw = extractGeminiText(json) || "{}";
   // Strip markdown code fences if Gemini wraps the JSON.
   raw = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```$/, "$1").trim();
 
@@ -313,53 +390,56 @@ const EMPTY: SoapNote = {
 };
 
 export async function generateSoap(transcript: string, patientContext: string) {
-  const config = getCompletionConfig();
-  const res = await fetchWithRetry(config.url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are a clinical documentation assistant. Convert a doctor-patient consultation transcript into a structured SOAP note.",
-            "STRICT GROUNDING RULES:",
-            "- Use ONLY information present in the transcript (plus the supplied patient context for demographics, allergies and known history).",
-            "- Never invent vital signs, examination findings, investigations, medicines, doses or durations that were not spoken.",
-            "- If vital signs or physical examination were not mentioned, output exactly \"Not documented\" for those fields.",
-            "- Every medicine, strength, frequency and duration must appear in the transcript. If a detail was not stated, leave that segment blank rather than guessing.",
-            "- The assessment must be a realistic clinical impression that follows directly from the complaints and findings actually discussed.",
-            "- Lifestyle advice must reflect advice the doctor actually gave; you may only phrase it clearly, not add new instructions.",
-            "- Recommended tests only if investigations were discussed, otherwise \"Not documented\".",
-            "Respond with JSON only.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: `Patient context: ${patientContext || "not provided"}\n\nTranscript:\n${transcript}\n\nReturn JSON with exactly these string keys:\nchief_complaint — the patient's presenting complaint in their own terms.\nhistory — History of Present Illness (onset, duration, progression, aggravating/relieving factors) built from the conversation.\nvitals — vital signs if spoken, else "Not documented".\nexamination — physical examination findings if spoken, else "Not documented".\nother_observations — allergies, past medical history and previous illnesses mentioned in the transcript or patient context; write "Allergies: …", "Past history: …", "Previous illnesses: …" lines. Use "Not documented" for anything absent.\nassessment — likely diagnosis, grounded in the conversation.\nclinical_impression — short severity/risk reasoning.\nplan — brief overall management plan.\nmedicines — one medicine per line, EXACTLY in the format "Name Strength — Dosage — Frequency — Duration" (e.g. "Paracetamol 650 mg — 1 tablet — Twice daily after food — 5 days"). Omit a segment only if it was never stated. Empty string if no medicine was prescribed.\nlifestyle_advice — one advice point per line, no bullet characters.\nrecommended_tests — one per line, or "Not documented".\nfollow_up — follow-up instruction as spoken (e.g. "Review after 2 weeks").`,
-        },
-      ],
-      response_format: { type: "json_object" },
+  const systemPrompt = [
+    "You are a clinical documentation assistant. Convert a doctor-patient consultation transcript into a structured SOAP note.",
+    "STRICT GROUNDING RULES:",
+    "- Use ONLY information present in the transcript (plus the supplied patient context for demographics, allergies and known history).",
+    "- Never invent vital signs, examination findings, investigations, medicines, doses or durations that were not spoken.",
+    "- If vital signs or physical examination were not mentioned, output exactly \"Not documented\" for those fields.",
+    "- Every medicine, strength, frequency and duration must appear in the transcript. If a detail was not stated, leave that segment blank rather than guessing.",
+    "- The assessment must be a realistic clinical impression that follows directly from the complaints and findings actually discussed.",
+    "- Lifestyle advice must reflect advice the doctor actually gave; you may only phrase it clearly, not add new instructions.",
+    "- Recommended tests only if investigations were discussed, otherwise \"Not documented\".",
+    "Respond with JSON only.",
+  ].join("\n");
+  const userPrompt = `Patient context: ${patientContext || "not provided"}\n\nTranscript:\n${transcript}\n\nReturn JSON with exactly these string keys:\nchief_complaint — the patient's presenting complaint in their own terms.\nhistory — History of Present Illness (onset, duration, progression, aggravating/relieving factors) built from the conversation.\nvitals — vital signs if spoken, else "Not documented".\nexamination — physical examination findings if spoken, else "Not documented".\nother_observations — allergies, past medical history and previous illnesses mentioned in the transcript or patient context; write "Allergies: …", "Past history: …", "Previous illnesses: …" lines. Use "Not documented" for anything absent.\nassessment — likely diagnosis, grounded in the conversation.\nclinical_impression — short severity/risk reasoning.\nplan — brief overall management plan.\nmedicines — one medicine per line, EXACTLY in the format "Name Strength — Dosage — Frequency — Duration" (e.g. "Paracetamol 650 mg — 1 tablet — Twice daily after food — 5 days"). Omit a segment only if it was never stated. Empty string if no medicine was prescribed.\nlifestyle_advice — one advice point per line, no bullet characters.\nrecommended_tests — one per line, or "Not documented".\nfollow_up — follow-up instruction as spoken (e.g. "Review after 2 weeks").`;
 
-    }),
-  });
+  let raw = "{}";
+  if (process.env.GEMINI_API_KEY) {
+    // Native Gemini path with model failover — more reliable than OpenAI-compat under load.
+    raw = await geminiGenerateContent({ system: systemPrompt, user: userPrompt });
+  } else {
+    const config = getCompletionConfig();
+    const res = await fetchWithRetry(config.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
 
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+      if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
+      if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
+      throw new Error(`Note generation failed (${res.status}). ${detail.slice(0, 200)}`);
+    }
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
-    if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
-    throw new Error(`Note generation failed (${res.status}). ${detail.slice(0, 200)}`);
+    const json = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    raw = json.choices?.[0]?.message?.content ?? "{}";
   }
 
-  const json = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  let raw = json.choices?.[0]?.message?.content ?? "{}";
   let parsed: Partial<SoapNote> = {};
   try {
     raw = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```$/, "$1").trim();
@@ -401,6 +481,38 @@ export type TranslationResult = {
  * SUPPORTED_LANGUAGES — the model handles any language it recognises.
  */
 export async function detectAndTranslate(transcript: string): Promise<TranslationResult> {
+  // Use the native Gemini generateContent API instead of the OpenAI-compat endpoint.
+  // The compat endpoint can return 503 for newer model names and lacks reliable json_object support.
+  if (process.env.GEMINI_API_KEY) {
+    const systemPrompt = [
+      "You are a medical interpreter for doctor-patient consultations.",
+      "Identify the dominant spoken language of the transcript and translate it into clear clinical English.",
+      `Commonly expected languages include: ${SUPPORTED_LANGUAGES.join(", ")}. Any other language must be named accurately in English (e.g. "Tamil", "Marathi").`,
+      "TRANSLATION RULES:",
+      "- Preserve meaning exactly. Never add, omit or infer clinical information.",
+      "- Preserve every symptom, medical history item, allergy, medicine name, strength, dosage, frequency, duration, diagnosis, advice and follow-up instruction verbatim in meaning.",
+      "- Keep the speaker turns and ordering of the conversation.",
+      "- Keep numbers, units and drug names unchanged.",
+      "- If the transcript is already English, return it unchanged as the translation.",
+      'Respond with JSON only — exactly these two string keys: "language" and "translation".',
+    ].join("\n");
+    const userPrompt = `Transcript:\n${transcript}\n\nReturn JSON with exactly these string keys:\nlanguage — the detected language name in English.\ntranslation — the full English translation of the transcript.`;
+
+    const raw = await geminiGenerateContent({ system: systemPrompt, user: userPrompt });
+    let parsed: Partial<TranslationResult> = {};
+    try { parsed = JSON.parse(raw) as Partial<TranslationResult>; } catch { parsed = {}; }
+
+    let translation = typeof parsed.translation === "string" ? parsed.translation.trim() : "";
+    const detectedLanguage = (typeof parsed.language === "string" && parsed.language.trim()) || "Unknown";
+    if (!translation && detectedLanguage === "English") translation = transcript.trim();
+    if (!translation) throw new Error("Translation failed. Please retry.");
+    return {
+      language: detectedLanguage,
+      translation,
+    };
+  }
+
+  // Fallback: OpenAI-compat endpoint (when no Gemini key is configured).
   const config = getCompletionConfig();
   const res = await fetchWithRetry(config.url, {
     method: "POST",
@@ -438,6 +550,7 @@ export async function detectAndTranslate(transcript: string): Promise<Translatio
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
     if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
     throw new Error(`Translation failed. Please retry. (${res.status}) ${detail.slice(0, 160)}`);
   }
@@ -457,7 +570,7 @@ export async function detectAndTranslate(transcript: string): Promise<Translatio
   if (!translation && detectedLanguage === "English") translation = transcript.trim();
   if (!translation) throw new Error("Translation failed. Please retry.");
   return {
-    language: (typeof parsed.language === "string" && parsed.language.trim()) || "Unknown",
+    language: detectedLanguage,
     translation,
   };
 }
@@ -496,9 +609,38 @@ export async function transcribeAndTranslateSegment(
   const original = text.trim();
   if (!original) return { original: "", english: "", language: languageHint ?? "" };
 
+  // Use the native Gemini generateContent API to avoid OpenAI-compat 503 errors.
+  if (process.env.GEMINI_API_KEY) {
+    const systemPrompt = [
+      "You are a live medical interpreter working on short fragments of a doctor-patient consultation.",
+      `The spoken language is one of: ${SUPPORTED_LANGUAGES.join(", ")}. Name it exactly as one of those words, or "Unknown".`,
+      "Translate the fragment into clinical English, preserving every symptom, duration, allergy, medicine name, strength, dose, frequency and instruction exactly.",
+      "If the fragment is already English, return it unchanged as the translation.",
+      "Never add, omit or infer clinical information. Never comment on the text.",
+      'Respond with JSON only — exactly these two string keys: "language" and "translation".',
+    ].join("\n");
+    const userPrompt = `${languageHint ? `Language detected so far: ${languageHint}.\n` : ""}Fragment:\n${original}\n\nReturn JSON with string keys: language, translation.`;
+
+    const raw = await geminiGenerateContent({ system: systemPrompt, user: userPrompt });
+    let parsed: { language?: string; translation?: string } = {};
+    try { parsed = JSON.parse(raw); } catch { parsed = {}; }
+
+    const detected =
+      typeof parsed.language === "string" &&
+      (SUPPORTED_LANGUAGES as readonly string[]).includes(parsed.language.trim())
+        ? parsed.language.trim()
+        : (languageHint ?? "Unknown");
+
+    return {
+      original,
+      english: (typeof parsed.translation === "string" ? parsed.translation : "").trim() || original,
+      language: detected,
+    };
+  }
+
+  // Fallback: OpenAI-compat endpoint (when no Gemini key is configured).
   const config = getCompletionConfig();
   const res = await fetchWithRetry(config.url, {
-
     method: "POST",
     headers: { Authorization: `Bearer ${config.key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -527,6 +669,7 @@ export async function transcribeAndTranslateSegment(
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     if (res.status === 429) throw new Error("AI rate limit reached — please try again shortly.");
+    if (res.status === 503) throw new Error("AI service temporarily unavailable (503) — retrying will resolve this.");
     if (res.status === 402) throw new Error("AI credits exhausted — add credits to continue.");
     throw new Error(`Live translation failed (${res.status}). ${detail.slice(0, 160)}`);
   }

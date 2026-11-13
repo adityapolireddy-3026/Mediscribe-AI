@@ -8,6 +8,26 @@ export const REPORT_BUCKET = "patient-reports";
 export const MAX_REPORT_BYTES = 15 * 1024 * 1024;
 export const ALLOWED_REPORT_TYPES = ["application/pdf", "image/jpeg", "image/png"];
 
+function storageErrorMessage(error: unknown, fallback = "Upload failed") {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+
+  if (!message) return fallback;
+
+  if (message.toLowerCase().includes("bucket not found") || message.toLowerCase().includes(`"${REPORT_BUCKET}"`)) {
+    return `Storage bucket "${REPORT_BUCKET}" is missing. Create a private Supabase Storage bucket with this exact name and retry the upload.`;
+  }
+
+  if (message.toLowerCase().includes("row level security") || message.toLowerCase().includes("rls")) {
+    return "Storage access is blocked by Supabase RLS. Make sure the bucket policy allows authenticated reception/admin uploads.";
+  }
+
+  if (message.toLowerCase().includes("file too large")) {
+    return "The file is too large. Please upload a document smaller than 15 MB.";
+  }
+
+  return message;
+}
+
 /** Reports for one patient, or every report when no patient is given. */
 export function usePatientReports(patientId?: string) {
   return useQuery({
@@ -57,7 +77,9 @@ export function useUploadReport() {
       const upload = await supabase.storage
         .from(REPORT_BUCKET)
         .upload(path, file, { contentType: file.type, upsert: false });
-      if (upload.error) throw upload.error;
+      if (upload.error) {
+        throw new Error(storageErrorMessage(upload.error, "Report upload failed."));
+      }
 
       const { error } = await supabase.from("patient_reports").insert({
         patient_id: values.patient_id,
@@ -73,7 +95,7 @@ export function useUploadReport() {
       });
       if (error) {
         await supabase.storage.from(REPORT_BUCKET).remove([path]);
-        throw error;
+        throw new Error(storageErrorMessage(error, "Report record could not be saved."));
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["patient_reports"] }),
@@ -85,8 +107,9 @@ export function useDeleteReport() {
   return useMutation({
     mutationFn: async (report: PatientReport) => {
       const { error } = await supabase.from("patient_reports").delete().eq("id", report.id);
-      if (error) throw error;
-      await supabase.storage.from(REPORT_BUCKET).remove([report.file_path]);
+      if (error) throw new Error(storageErrorMessage(error, "Report could not be removed."));
+      const { error: storageError } = await supabase.storage.from(REPORT_BUCKET).remove([report.file_path]);
+      if (storageError) throw new Error(storageErrorMessage(storageError, "Stored file could not be removed."));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["patient_reports"] }),
   });
@@ -97,6 +120,6 @@ export async function reportUrl(path: string, download = false) {
   const { data, error } = await supabase.storage
     .from(REPORT_BUCKET)
     .createSignedUrl(path, 300, download ? { download: true } : undefined);
-  if (error) throw error;
+  if (error) throw new Error(storageErrorMessage(error, "Report could not be opened."));
   return data.signedUrl;
 }

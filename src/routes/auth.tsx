@@ -158,8 +158,8 @@ function AuthPage() {
       "there";
     const greeting =
       actual === "doctor"
-        ? `Welcome, Dr. ${name}. Redirecting to your dashboard...`
-        : `Welcome, ${name}. Redirecting to your dashboard...`;
+        ? `Welcome, Dr. ${name}....`
+        : `Welcome, ${name}.  ...`;
     setSuccess(greeting);
     toast.success(greeting);
     setTimeout(() => navigate({ to: homeRouteFor(actual), replace: true }), 900);

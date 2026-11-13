@@ -69,6 +69,9 @@ import {
 } from "@/components/ui/select";
 
 export const Route = createFileRoute("/_authenticated/consultations")({
+  validateSearch: (search: Record<string, unknown>): { patientId?: string } => ({
+    patientId: typeof search.patientId === "string" ? search.patientId : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Consultations — MediScribe AI" },
@@ -124,9 +127,10 @@ const SUPPORTED_SPEECH_LANGUAGES = [
 
 function ConsultationPage() {
   const navigate = useNavigate();
+  const { patientId: preselectedPatientId } = Route.useSearch();
   const { data: patients = [], isLoading } = usePatients("");
   const { data: profile } = useDoctorProfile();
-  const [patientId, setPatientId] = useState<string>("");
+  const [patientId, setPatientId] = useState<string>(preselectedPatientId ?? "");
   const [speechLanguage, setSpeechLanguage] = useState<string>("te-IN");
   const [levels, setLevels] = useState<number[]>([]);
   const [seconds, setSeconds] = useState(0);
@@ -164,6 +168,12 @@ function ConsultationPage() {
   /** Keeps track of text already translated to avoid duplicate live translation calls. */
   const lastTranslatedTextRef = useRef("");
   const translateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Prevents overlapping live translation API calls — only one in-flight at a time. */
+  const translateInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (preselectedPatientId) setPatientId(preselectedPatientId);
+  }, [preselectedPatientId]);
 
   const runTranscribe = useServerFn(transcribeAudio);
   const runTranslate = useServerFn(translateTranscript);
@@ -194,9 +204,13 @@ function ConsultationPage() {
   useEffect(() => {
     if (!recording || !transcript.trim()) return;
     const currentText = transcript.trim();
-    if (currentText.length - lastTranslatedTextRef.current.length >= 6) {
+    // Translate once we have a meaningful new burst of speech (≈ one short phrase).
+    if (currentText.length - lastTranslatedTextRef.current.length >= 4) {
       if (translateTimerRef.current) clearTimeout(translateTimerRef.current);
       translateTimerRef.current = setTimeout(async () => {
+        // Skip if a translation request is already in-flight to prevent duplicate calls.
+        if (translateInFlightRef.current) return;
+        translateInFlightRef.current = true;
         try {
           const out = await runTranslate({ data: { transcript: currentText } });
           if (out?.translation) {
@@ -208,9 +222,11 @@ function ConsultationPage() {
             lastTranslatedTextRef.current = currentText;
           }
         } catch {
-          // Ignore live interim translation errors quietly
+          // Ignore live interim translation errors quietly — final pass on Stop retries.
+        } finally {
+          translateInFlightRef.current = false;
         }
-      }, 1200);
+      }, 900);
     }
     return () => {
       if (translateTimerRef.current) clearTimeout(translateTimerRef.current);
@@ -228,11 +244,15 @@ function ConsultationPage() {
   /**
    * Transcribes audio AND translates to English in ONE Gemini call.
    * Sets original transcript, detected language, and English translation atomically.
+   * Preserves existing transcript and translation if the request fails.
    */
   async function processAudio(blob: Blob) {
+    // Snapshot existing data so we can restore it on failure.
+    const prevTranscript = transcript;
+    const prevTranslation = translation;
+    const prevLanguage = language;
+
     resetClinical();
-    setTranslation("");
-    setLanguage("");
     setTranscriptionStatus("live");
     try {
       setStage("transcribing");
@@ -241,8 +261,13 @@ function ConsultationPage() {
         data: { audioBase64, mimeType: blob.type || "audio/wav" },
       });
       if (!result.original) {
-        setStage("idle");
-        setTranscriptionStatus("failed");
+        // Restore previous data so the user doesn't lose what they had.
+        setTranscript(prevTranscript);
+        setTranslation(prevTranslation);
+        setLanguage(prevLanguage);
+        translationRef.current = prevTranslation;
+        setStage(prevTranscript ? "ready" : "idle");
+        setTranscriptionStatus(prevTranscript ? "partial" : "failed");
         toast.error("Unable to transcribe the audio. Please try again.");
         return null;
       }
@@ -262,19 +287,31 @@ function ConsultationPage() {
       }
       return result.translation;
     } catch (error) {
-      setStage("idle");
-      setTranscriptionStatus("failed");
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Unable to transcribe the audio. Please try again.",
-      );
+      // Restore previous data so the user doesn't lose the transcript or translation.
+      setTranscript(prevTranscript);
+      setTranslation(prevTranslation);
+      setLanguage(prevLanguage);
+      translationRef.current = prevTranslation;
+      setTranscriptionStatus(prevTranscript ? "partial" : "failed");
+      const msg = error instanceof Error ? error.message : "Unable to transcribe the audio.";
+
+      // Fallback: browser Web Speech already captured Telugu (or other) text —
+      // translate that to English so the English panel is never left empty.
+      if (prevTranscript.trim()) {
+        toast.message("Audio AI was busy — translating the live transcript to English…");
+        const english = await translateText(prevTranscript);
+        if (english) return english;
+      }
+
+      setStage(prevTranscript ? "ready" : "idle");
+      toast.error(`${msg} Your previous transcript has been preserved — you can retry.`);
       return null;
     }
   }
 
   /** Detects the language of the current transcript and produces the English translation. */
   async function translateText(text: string) {
+    const prevTranslation = translation;
     try {
       setStage("translating");
       const out = await runTranslate({ data: { transcript: text } });
@@ -292,8 +329,12 @@ function ConsultationPage() {
       }
       return out.translation;
     } catch (error) {
-      setStage("idle");
-      toast.error(error instanceof Error ? error.message : "Translation failed. Please retry.");
+      // Preserve any existing translation on failure — don't wipe it.
+      setTranslation(prevTranslation);
+      translationRef.current = prevTranslation;
+      setStage(prevTranslation ? "ready" : "idle");
+      const msg = error instanceof Error ? error.message : "Translation failed.";
+      toast.error(`${msg} ${prevTranslation ? "Previous translation preserved — " : ""}Please retry.`);
       return null;
     }
   }
@@ -332,8 +373,11 @@ function ConsultationPage() {
         }
         liveLinesRef.current += 1;
       } catch (err) {
+        // Segment failed — mark as partial but preserve everything already captured.
         console.error("Live segment error:", err);
-        toast.error(err instanceof Error ? err.message : "Live transcription segment failed.");
+        setTranscriptionStatus("partial");
+        const msg = err instanceof Error ? err.message : "A speech segment could not be processed.";
+        toast.error(`${msg} Existing transcript preserved — recording continues.`);
       } finally {
         setPending((n) => Math.max(0, n - 1));
       }
