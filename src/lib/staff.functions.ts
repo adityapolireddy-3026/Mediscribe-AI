@@ -101,7 +101,7 @@ export const listActiveDoctors = createServerFn({ method: "POST" })
 /** Admin-only: creates a doctor or receptionist login plus their staff profile. */
 export const createStaffAccount = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { role: StaffRole; password: string; profile: StaffProfileInput }) => input)
+  .validator((input: { role: StaffRole; password: string; profile: StaffProfileInput }) => input)
   .handler(async ({ data, context }) => {
     await assertAdmin(context);
     if (!data.profile.full_name?.trim()) throw new Error("Full name is required");
@@ -144,7 +144,7 @@ export const createStaffAccount = createServerFn({ method: "POST" })
 /** Admin-only: updates a staff profile and optionally resets their password. */
 export const updateStaffAccount = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator(
+  .validator(
     (input: { id: string; profile: StaffProfileInput; password?: string | null }) => input,
   )
   .handler(async ({ data, context }) => {
@@ -169,7 +169,7 @@ export const updateStaffAccount = createServerFn({ method: "POST" })
 /** Admin-only: activates or deactivates a staff account. Inactive accounts cannot sign in. */
 export const setStaffStatus = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { id: string; status: "active" | "inactive" }) => input)
+  .validator((input: { id: string; status: "active" | "inactive" }) => input)
   .handler(async ({ data, context }) => {
     await assertAdmin(context);
     if (data.id === context.userId) throw new Error("You cannot deactivate your own account");
@@ -188,7 +188,7 @@ export const setStaffStatus = createServerFn({ method: "POST" })
 /** Admin-only: removes a staff account entirely. */
 export const deleteStaffAccount = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { id: string }) => input)
+  .validator((input: { id: string }) => input)
   .handler(async ({ data, context }) => {
     await assertAdmin(context);
     if (data.id === context.userId) throw new Error("You cannot remove your own account");

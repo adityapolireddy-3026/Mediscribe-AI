@@ -10,7 +10,7 @@ import {
 
 export const transcribeAudio = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { audioBase64: string; mimeType: string }) => {
+  .validator((input: { audioBase64: string; mimeType: string }) => {
     if (!input?.audioBase64) throw new Error("No audio provided.");
     return input;
   })
@@ -18,7 +18,7 @@ export const transcribeAudio = createServerFn({ method: "POST" })
 
 export const generateSoapNote = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { transcript: string; patientContext?: string }) => {
+  .validator((input: { transcript: string; patientContext?: string }) => {
     if (!input?.transcript?.trim()) throw new Error("Transcript is empty.");
     return input;
   })
@@ -26,7 +26,7 @@ export const generateSoapNote = createServerFn({ method: "POST" })
 
 export const translateTranscript = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { transcript: string }) => {
+  .validator((input: { transcript: string }) => {
     if (!input?.transcript?.trim()) throw new Error("Transcript is empty.");
     return input;
   })
@@ -34,7 +34,7 @@ export const translateTranscript = createServerFn({ method: "POST" })
 
 export const transcribeLiveSegment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { audioBase64: string; mimeType: string; languageHint?: string }) => {
+  .validator((input: { audioBase64: string; mimeType: string; languageHint?: string }) => {
     if (!input?.audioBase64) throw new Error("No audio provided.");
     return input;
   })
@@ -49,7 +49,7 @@ export const transcribeLiveSegment = createServerFn({ method: "POST" })
  */
 export const transcribeAndTranslateAudio = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { audioBase64: string; mimeType: string }) => {
+  .validator((input: { audioBase64: string; mimeType: string }) => {
     if (!input?.audioBase64) throw new Error("No audio provided.");
     return input;
   })
