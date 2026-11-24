@@ -7,7 +7,7 @@ import {
   ShieldCheck,
   FileText,
   ArrowRight,
-  
+
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
@@ -90,7 +90,7 @@ function Landing() {
               </span>
               <h1 className="mt-5 text-4xl font-extrabold leading-tight sm:text-5xl">
                 MediScribe AI —{" "}
-                <span className="text-gradient-clinical">AI-powered clinical documentation</span>
+                <span className="text-gradient-clinical">AI-powered medical scribe and clinical documentation.</span>
               </h1>
               <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">
                 Convert doctor–patient conversations into structured clinical notes and store them
