@@ -14,7 +14,7 @@ export function SiteFooter() {
         <div>
           <h3 className="font-display text-base font-bold">Contact</h3>
           <p className="mt-2 text-sm text-muted-foreground">support@mediscribe.ai</p>
-          <p className="text-sm text-muted-foreground">+1 (555) 018-2245</p>
+          <p className="text-sm text-muted-foreground">9701105426</p>
         </div>
         <div>
           <h3 className="font-display text-base font-bold">Privacy Policy</h3>
